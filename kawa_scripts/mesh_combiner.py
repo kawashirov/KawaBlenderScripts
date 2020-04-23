@@ -16,6 +16,7 @@ import math
 import collections
 
 from .commons import *
+from . import config
 
 if typing.TYPE_CHECKING:
 	from typing import *
@@ -64,408 +65,141 @@ def common_str_slots(obj, keys: 'Iterable[str]', exclude: 'Collection[str]' = tu
 	})
 
 
-class OriginalMaterialSetup:
-	# Описывает свойства и правила для конкретного материала
-	
-	L_ATLAS_SCALE = 'atlas_scale'
-	L_ORIGINAL_SIZE = 'atlas_size'
-	
-	L_LM_SCALE = 'lightmap_scale'
-	
-	__slots__ = (
-		'parent', 'material',
-		'original_size', '_detected_size',
-		'atlas_ignore', 'atlas_material_name', 'atlas_single_island', 'atlas_scale', 'atlas_epsilon',
-		'lm_ignore', 'lm_scale',
-	)
-	
-	def __init__(self, parent: 'KawaMeshCombiner', material: 'bpy.types.Material'):
-		self.parent = parent  # type: KawaMeshCombiner
-		self.material = material  # type: bpy.types.Material
-		
-		self.original_size = None  # type: Optional[SizeFloat]
-		# Если False определение не производилось
-		self._detected_size = False  # type: Union[SizeFloat, bool, None]
-		
-		self.atlas_ignore = None  # type: Optional[bool]
-		self.atlas_material_name = None  # type: Optional[str]
-		self.atlas_single_island = None  # type: Optional[bool]
-		self.atlas_scale = 1.0  # type: float
-		self.atlas_epsilon = None  # type: Optional[float]
-		
-		self.lm_ignore = None  # type: Optional[bool]
-		self.lm_scale = 1.0  # type: float
-	
-	@classmethod
-	def from_raw_config(
-			cls, parent: 'KawaMeshCombiner', material: 'bpy.types.Material', raw_setup: 'Optional[SetupRaw]'
-	) -> 'OriginalMaterialSetup':
-		omat_setup = cls(parent, material)
-		
-		if omat_setup is None:
-			omat_setup = dict()
-		
-		prefix = parent.L_ORIGINAL_MATERIALS + '.' + material.name + '.'
-		
-		atlas_ignore = parent.validate_bool(
-			raw_setup.get(KawaMeshCombiner.L_ATLAS_IGNORE), prefix + KawaMeshCombiner.L_ATLAS_IGNORE
-		)
-		omat_setup.atlas_ignore = any_not_none(atlas_ignore, omat_setup.atlas_ignore)
-		if omat_setup.atlas_ignore is not True:
-			omat_setup.atlas_material_name = parent.validate_string(
-				raw_setup.get(KawaMeshCombiner.L_ATLAS_TARGET_MATERIAL), prefix + KawaMeshCombiner.L_ATLAS_TARGET_MATERIAL
-			)
-			omat_setup.atlas_single_island = parent.validate_bool(
-				raw_setup.get(KawaMeshCombiner.L_ATLAS_SINGLE_ISLAND), prefix + KawaMeshCombiner.L_ATLAS_SINGLE_ISLAND
-			)
-			omat_setup.atlas_epsilon = parent.validate_int_positive_or_zero(
-				raw_setup.get(KawaMeshCombiner.L_ATLAS_EPSILON), prefix + KawaMeshCombiner.L_ATLAS_EPSILON
-			)
-			atlas_scale = parent.validate_float(raw_setup.get(cls.L_ATLAS_SCALE), prefix + cls.L_ATLAS_SCALE)
-			omat_setup.atlas_scale = any_not_none(atlas_scale, omat_setup.atlas_scale)
-			
-			omat_setup.original_size = parent.validate_size_int(raw_setup.get(cls.L_ORIGINAL_SIZE), prefix + cls.L_ORIGINAL_SIZE)
-		
-		lm_ignore = parent.validate_bool(raw_setup.get(KawaMeshCombiner.L_LM_IGNORE), prefix + KawaMeshCombiner.L_LM_IGNORE)
-		omat_setup.lm_ignore = any_not_none(lm_ignore, omat_setup.lm_ignore)
-		if omat_setup.lm_ignore is not True:
-			lm_scale = parent.validate_float(raw_setup.get(cls.L_LM_SCALE), prefix + cls.L_LM_SCALE)
-			omat_setup.lm_scale = any_not_none(lm_scale, omat_setup.lm_scale)
-		return omat_setup
-	
-	def __str__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def __repr__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def find_tex_size(self) -> 'Optional[SizeFloat]':
-		tex_sz_x, tex_sz_y, tex_count = 0, 0, 0
-		if self.material.texture_slots is not None:
-			for slot in self.material.texture_slots:
-				if slot is None or not slot.use: continue
-				if isinstance(slot.texture, bpy.types.ImageTexture):
-					image = slot.texture.image  # type: bpy.types.Image
-					tex_sz_x += image.size[0]
-					tex_sz_y += image.size[1]
-					tex_count += 1
-		return (float(tex_sz_x) / tex_count, float(tex_sz_y) / tex_count) if tex_count > 0 and tex_sz_x > 0 and tex_sz_y > 0 else None
-	
-	def get_atlas_material_name(self) -> 'str':
-		return any_not_none(self.atlas_material_name, self.parent.atlas_material_name)
-	
-	def get_atlas_material_setup(self) -> 'AtlasMaterialSetup':
-		atlas_material_name = self.get_atlas_material_name()
-		if atlas_material_name is None:
-			raise ConfigurationError('atlas_material_name is not set!', self.material, self.atlas_material_name, self.parent.atlas_material_name)
-		return self.parent.get_atlas_material_setup(atlas_material_name)
-	
-	def get_atlas_ignore(self) -> 'bool':
-		atlas_ignore = any_not_none(self.atlas_ignore, self.parent.atlas_ignore)
-		if atlas_ignore is None:
-			raise ConfigurationError('atlas_ignore is not set!', self.material, self.atlas_ignore, self.parent.atlas_ignore)
-		return atlas_ignore
-	
-	def get_original_size(self) -> 'SizeFloat':
-		if self.get_atlas_ignore():
-			raise RuntimeError('Can not get original_size, because atlas_ignore is set to True!', self.material)
-		if self.original_size is not None:
-			return self.original_size
-		if self._detected_size is False:
-			self._detected_size = self.find_tex_size()
-		if self._detected_size is not None:
-			return self._detected_size
-		if self.parent.original_size is not None:
-			return self.parent.original_size
-		raise ConfigurationError('original_size is not set!', self.material, self.original_size, self.parent.original_size)
-	
-	def get_atlas_single_island(self) -> 'bool':
-		if self.get_atlas_ignore():
-			raise RuntimeError('Can not get atlas_single_island, because atlas_ignore is set to True!', self.material)
-		if self.parent.fast_mode:
-			return True
-		atlas_single_island = any_not_none(self.atlas_single_island, self.parent.atlas_single_island)
-		if atlas_single_island is None:
-			raise ConfigurationError('atlas_single_island is not set!', self.material, self.atlas_single_island, self.parent.atlas_single_island)
-		return atlas_single_island
-	
-	def get_atlas_epsilon(self) -> 'float':
-		if self.get_atlas_ignore():
-			raise RuntimeError('Can not get atlas_epsilon, because atlas_ignore is set to True!', self.material)
-		epsilon = any_not_none(self.atlas_epsilon, self.parent.atlas_epsilon)
-		if epsilon is None:
-			raise ConfigurationError('atlas_epsilon is not set!', self.material, self.atlas_epsilon, self.parent.atlas_epsilon)
-		return epsilon
-	
-	def get_lm_ignore(self) -> 'bool':
-		lm_ignore = any_not_none(self.lm_ignore, self.parent.lm_ignore)
-		if lm_ignore is None:
-			raise ConfigurationError('lm_ignore is not set!', self.material, self.lm_ignore, self.parent.lm_ignore)
-		return lm_ignore
-	
-	def check_values(self):
-		self.get_atlas_material_name()
-		if not self.get_atlas_ignore():
-			self.get_original_size()
-			self.get_atlas_single_island()
-			self.get_atlas_epsilon()
-		self.get_lm_ignore()
-
-
-class AtlasTextureSetup:
-	# Описывает свойства и правила для текстуры, в которую будет запекаться результат
-	
-	SUPPORTED_TYPES = {'TEXTURE', 'EMIT', 'NORMALS', 'SPEC_INTENSITY', 'SPEC_COLOR'}
-	
-	L_TYPE = 'type'
-	L_SIZE = 'size'
-	
-	__slots__ = (
-		'parent', 'texture', 'image',
-		'type', 'size'
-	)
-	
-	def __init__(self, parent: 'KawaMeshCombiner', _type: 'str', **setup):
-		self.parent = parent
-		self.texture = None  # type: Optional[bpy.types.ImageTexture]
-		self.image = None  # type: Optional[bpy.types.Image]
-		
-		if _type not in self.SUPPORTED_TYPES:
-			raise ConfigurationError("Invalid type of texture!", _type, self.SUPPORTED_TYPES)
-		
-		if setup is None:
-			setup = dict()
-		
-		prefix = parent.L_ATLAS_TEXTURES + '.' + _type + '.'
-		self.type = _type
-		self.size = parent.validate_size_int(setup.get(self.L_SIZE), prefix + self.L_SIZE)
-	
-	def __str__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def __repr__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def get_texture_name(self):
-		return self.parent.atlas_texture_prefix + '-' + self.type
-	
-	def get_size(self) -> 'SizeInt':
-		return any_not_none(self.size, self.parent.atlas_size)
-	
-	def prepare_texture(self) -> 'bpy.types.Texture':
-		if self.texture is not None:
-			return self.texture
-		tex = None
-		tex_name = None
-		try:
-			tex_name = self.get_texture_name()
-			tex = bpy.context.blend_data.textures.get(tex_name)  # type: Optional[Union[bpy.types.Texture, bpy.types.ImageTexture]]
-			if tex is not None and not isinstance(tex, bpy.types.ImageTexture):
-				log.warning("Removing atlas texture '%s', because it's not ImageTexture: %s", tex_name, tex, type(tex))
-				bpy.context.blend_data.textures.remove(tex)
-				tex = None
-			if tex is None:
-				tex = bpy.context.blend_data.textures.new(tex_name, 'IMAGE')
-			tex.image = self.prepare_image()
-			self.texture = tex
-			return self.texture
-		except Exception as exc:
-			raise RuntimeError("Error creating atlas texture", tex_name, tex) from exc
-	
-	def prepare_image(self) -> 'bpy.types.Image':
-		if self.image is not None:
-			return self.image
-		image = None
-		image_name = None
-		try:
-			image_name = self.get_texture_name()
-			size = self.get_size()
-			image = bpy.context.blend_data.images.get(image_name)  # type: Optional[bpy.types.Image]
-			if image is not None and (image.size[0] != size[0] or image.size[1] != size[1]):
-				s = image.size
-				log.warning("Removing atlas image '%s', because of wrong size: need %s, have %s", image.name, size, (s[0], s[1]))
-				bpy.context.blend_data.images.remove(image)
-				image = None
-			if image is not None and image.channels != 4:
-				log.warning("Removing atlas image '%s', because of wrong number of channels: need 4, have %s", image.name, image.channels)
-				bpy.context.blend_data.images.remove(image)
-				image = None
-			if image is None:
-				log.info("Creating new atlas image '%s'...", image_name)
-				image = bpy.context.blend_data.images.new(image_name, size[0], size[1], alpha=True, float_buffer=False)
-			image.colorspace_settings.name = 'Non-Color' if self.type is 'NORMALS' else 'sRGB'
-			self.image = image
-			return self.image
-		except Exception as exc:
-			raise RuntimeError("Error creating atlas image!", image_name, image) from exc
-	
-	def _get_or_create_slot(self, tmat: 'bpy.types.Material') -> 'bpy.types.MaterialTextureSlot':
-		# Переиспользование или создание слота с этой текстуре в данном материале
-		ttex = self.prepare_texture()
-		for slot_index in range(len(tmat.texture_slots)):
-			slot = tmat.texture_slots[slot_index]
-			if slot is not None and tmat.texture_slots[slot_index].texture == ttex:
-				return tmat.texture_slots[slot_index]
-		new_slot = tmat.texture_slots.add()  # type: bpy.types.MaterialTextureSlot
-		new_slot.texture = ttex
-		return new_slot
-	
-	def attach_to(self, tmat: 'bpy.types.Material'):
-		slot = self._get_or_create_slot(tmat)
-		slot.use_map_color_diffuse = self.type == 'TEXTURE'
-		slot.use_map_alpha = self.type == 'TEXTURE'
-		slot.use_map_emission = self.type == 'EMIT'
-		slot.use_map_normal = self.type == 'NORMALS'
-		slot.use_map_specular = self.type == 'SPEC_INTENSITY'
-		slot.use_map_color_spec = self.type == 'SPEC_COLOR'
-		slot.use_rgb_to_intensity = self.type == 'EMIT'
-		slot.blend_type = 'MULTIPLY'
-		if self.type == 'EMIT':
-			tmat.emit = 1
-
-
-class AtlasMaterialSetup:
-	# Описывает свойства и правила для конечного материала
-	
-	L_ORDER = 'order'
-	L_USE_TRANSPARENCY = 'use_transparency'
-	L_ALPHA = 'alpha'
-	
-	__slots__ = (
-		'parent', 'name', 'material',
-		'order', 'use_transparency', 'alpha',
-	)
-	
-	def __init__(self, parent: 'KawaMeshCombiner', name: 'str', **setup):
-		self.parent = parent
-		self.name = name
-		self.material = None  # type: Optional[bpy.types.Material]
-		
-		if setup is None: setup = dict()
-		
-		prefix = parent.L_ORIGINAL_MATERIALS + '.' + name + '.'
-		self.order = parent.validate_float(setup.get(self.L_ORDER), prefix + self.L_ORDER)
-		self.use_transparency = parent.validate_bool(setup.get(self.L_USE_TRANSPARENCY), prefix + self.L_USE_TRANSPARENCY)
-		self.alpha = parent.validate_bool(setup.get(self.L_ALPHA), prefix + self.L_ALPHA)
-	
-	def __str__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def __repr__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def prepare_material_bpy(self) -> 'bpy.types.Material':
-		if self.material is not None:
-			return self.material
-		try:
-			tmat = bpy.context.blend_data.materials.get(self.name)  # type: bpy.types.Material
-			if tmat is None:
-				log.info("Target material='%s' does not exist, creating new one...", self.name)
-				tmat = bpy.context.blend_data.materials.new(self.name)
-			self.material = tmat
-			for slot_index in range(len(tmat.texture_slots)):
-				if tmat.texture_slots[slot_index] is not None:
-					tmat.texture_slots.clear(slot_index)
-			tmat.diffuse_intensity = 1
-			tmat.diffuse_color = (1, 1, 1)
-			for atex_name, atex_setup in self.parent.prepare_all_atlas_textures().items():
-				atex_setup.attach_to(tmat)
-			return self.material
-		except Exception as exc:
-			raise RuntimeError("Error creating material!", self.name, self.material) from exc
-
-
-class OriginalObjectSetup:
-	# Описывает свойства и правила для исходного меш-объекта
-	
-	L_KEEP_UV_LAYERS = 'keep_uv_layers'
-	
-	__slots__ = (
-		'parent', 'object', '_target_object_name', 'keep_uv_layers',
-		'_uv0_original',
-		'_uv1_original',
-	)
-	
-	def __init__(self, parent: 'KawaMeshCombiner', _object: 'bpy.types.Object', **setup):
-		self.parent = parent
-		self.object = _object  # type: bpy.types.Object
-		
-		if setup is None:
-			setup = dict()
-		
-		prefix = parent.L_ORIGINAL_OBJECTS + '.' + _object.name + '.'
-		self._target_object_name = parent.validate_string(setup.get(parent.L_TARGET_OBJECT), prefix + parent.L_TARGET_OBJECT)
-		self._uv0_original = parent.validate_uv_index(setup.get(parent.L_UV0_ORIGINAL), prefix + parent.L_UV0_ORIGINAL)
-		self._uv1_original = parent.validate_uv_index(setup.get(parent.L_UV1_ORIGINAL), prefix + parent.L_UV1_ORIGINAL)
-		
-		self.keep_uv_layers = set()
-		for entry in KawaMeshCombiner.validate_seq_as_iterator(setup.get(self.L_KEEP_UV_LAYERS)):
-			if not is_valid_string(entry):
-				raise ConfigurationError("Invalid entry in config!", prefix, entry)
-			self.keep_uv_layers.add(entry)
-		pass
-	
-	def __str__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def __repr__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
-	
-	def get_target_object_name(self) -> 'str':
-		tobj_name = any_not_none(self._target_object_name, self.parent.target_object_name)
-		if not is_valid_string(tobj_name):
-			raise ConfigurationError("target_object_name is not set!", self.object.name, self._target_object_name, self.parent.target_object_name)
-		return tobj_name
-	
-	def get_uv0_original(self) -> 'UVLayerIndex':
-		return any_not_none(self._uv0_original, self.parent.uv0_original)
-	
-	def get_uv0_original_safe(self) -> 'str':
-		uv0_original = self.get_uv0_original()
-		if not is_valid_string(uv0_original):
-			raise ConfigurationError("uv0_original is not set!", self.object.name, self._uv0_original, self.parent.uv0_original)
-		return uv0_original
-	
-	def get_uv1_original(self) -> 'UVLayerIndex':
-		return any_not_none(self._uv1_original, self.parent.uv1_original)
-	
-	def get_uv1_original_safe(self) -> 'str':
-		uv1_original = self.get_uv1_original()
-		if not is_valid_string(uv1_original):
-			raise ConfigurationError("uv1_original is not set!", self.object.name, self._uv1_original, self.parent.uv1_original)
-		return uv1_original
-	
-	pass
-
-
 class ProcessingObjectSetup:
 	# Описывает свойства и правила для меш-объекта, на котором идет обработка
-	__slots__ = ('parent', 'object', 'original')
+	__slots__ = ('parent', 'object', 'source_object', 'source_material')
 	
-	def __init__(self, parent: 'KawaMeshCombiner', _object: 'bpy.types.Object', original: 'OriginalObjectSetup'):
+	def __init__(
+			self, parent: 'KawaMeshCombiner', _object: 'bpy.types.Object',
+			source_object: 'bpy.types.Object', source_material: 'bpy.types.Material'
+	):
 		self.parent = parent
 		self.object = _object  # type: bpy.types.Object
-		self.original = original  # type: OriginalObjectSetup
+		self.source_object = source_object  # type: bpy.types.Object
+		self.source_material = source_material  # type: bpy.types.Material
 	
 	def __str__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
 	
 	def __repr__(self) -> str: return common_str_slots(self, self.__slots__, ('parent',))
+	
+	def ensure_single_material_slot(self):
+		# На процессинг-объекте всегда один материал!
+		if len(self.object.material_slots) != 1:
+			raise AssertionError("self.object.material_slots) != 1", self.object, self.source_object, self.source_material)
 	
 	def get_material_bpy(self) -> 'bpy.types.Material':
 		if len(self.object.material_slots) != 1:
 			raise AssertionError("Processing object have not one material slot!", self.object)
 		return self.object.material_slots[0].material
 	
-	def get_target_object_name(self) -> 'str':
-		return self.original.get_target_object_name()
+	def get_atlas_original_uv(self, not_none=True) -> 'bpy.types.MeshTexturePolyLayer':
+		mesh = get_mesh_safe(self.object)
+		layer = mesh.uv_textures.get(KawaMeshCombiner.PROC_ORIGINAL_UV0_NAME)
+		if layer is None:
+			raise KeyError(KawaMeshCombiner.PROC_ORIGINAL_UV0_NAME, mesh, self.object)
+		return layer
 	
-	def should_process_altas(self):
-		return self.get_material_bpy()
+	def get_atlas_target_uv(self, not_none=True) -> 'bpy.types.MeshTexturePolyLayer':
+		return get_mesh_safe(self.object).uv_textures.get(KawaMeshCombiner.PROC_TARGET_UV0_NAME)
 	
-	def get_atlas_original_uv(self) -> 'bpy.types.MeshTexturePolyLayer':
-		return get_mesh_safe(self.object).uv_textures[self.parent.PROC_ORIGINAL_ATLAS_UV_NAME]
+	def atlas_is_ignored(self) -> 'bool':
+		value = self.parent.atlas_ignore.select_value(self.parent.GLOBAL_KEY, self.source_object, self.source_material)
+		if value is None:
+			raise RuntimeError('atlas_ignore is not set!', self.source_object, self.source_material)
+		return value
 	
-	def get_atlas_target_uv(self) -> 'bpy.types.MeshTexturePolyLayer':
-		return get_mesh_safe(self.object).uv_textures[self.parent.PROC_TARGET_ATLAS_UV_NAME]
+	def process_atlas(self) -> 'bool':
+		if self.atlas_is_ignored():
+			return False
+		if self.get_atlas_original_uv() is None:
+			return False
+		if self.get_atlas_target_uv() is None:
+			return False
+		return True
+	
+	def get_atlas_material_target(self):
+		if self.atlas_is_ignored():
+			raise RuntimeError("atlas_material_target not available for object with atlas_ignore=True")
+		amat = self.parent.atlas_material_target.select_value(self.parent.GLOBAL_KEY, self.source_material)
+		if amat is None:
+			raise RuntimeError('atlas_material_target is not set!', self.source_object, self.source_material)
+		return amat
 	
 	def reassign_material(self):
-		# Заменяет original material на target material
-		omat = self.get_material_bpy()
-		omat_setup = self.parent.original_materials[omat]
-		amat_setup = omat_setup.get_atlas_material_setup()
-		self.object.material_slots[0].material = amat_setup.prepare_material_bpy()
+		# Заменяет original material на atlas material в material_slots объекта
+		if self.atlas_is_ignored():
+			raise RuntimeError("reassign_material not available for object with atlas_ignore=True")
+		self.ensure_single_material_slot()
+		self.object.material_slots[0].material = self.get_atlas_material_target()
+	
+	def get_uv0_original(self) -> 'Optional[str]':
+		value = self.parent.uv0_original.select_value(self.parent.GLOBAL_KEY, self.source_object, (self.source_object, self.source_material))
+		# if value is None:
+		# 	raise RuntimeError("uv0_original is not set!", self.source_object, self.source_material)
+		return value
+	
+	def get_uv0_target(self) -> 'Optional[str]':
+		value = self.parent.uv0_target.select_value(self.parent.GLOBAL_KEY, self.source_object, (self.source_object, self.source_material))
+		# if value is None:
+		# 	raise RuntimeError("uv0_target is not set!", self.source_object, self.source_material)
+		return value
+	
+	def get_uv1_original(self) -> 'Optional[str]':
+		value = self.parent.uv1_original.select_value(self.parent.GLOBAL_KEY, self.source_object, (self.source_object, self.source_material))
+		# if value is None:
+		# 	raise RuntimeError("uv1_original is not set!", self.source_object, self.source_material)
+		return value
+	
+	def get_uv1_target(self) -> 'Optional[str]':
+		value = self.parent.uv1_target.select_value(self.parent.GLOBAL_KEY, self.source_object, (self.source_object, self.source_material))
+		# if value is None:
+		# 	raise RuntimeError("uv1_target is not set!", self.source_object, self.source_material)
+		return value
+	
+	def uvs_from_original_to_processing(self):
+		# Преобразует UVшки в рабочий формат.
+		
+		uv0_original = self.get_uv0_original()
+		uv1_original = self.get_uv1_original()
+		
+		atlas_is_ignored = self.atlas_is_ignored()
+		
+		if uv0_original is not None:
+			copy_uv_layer_exact_name(
+				self.object, uv0_original, KawaMeshCombiner.PROC_TARGET_UV0_NAME,
+				source_object=self.source_object, source_material=self.source_material
+			)
+			copy_uv_layer_exact_name(
+				self.object, uv0_original, KawaMeshCombiner.PROC_ORIGINAL_UV0_NAME,
+				source_object=self.source_object, source_material=self.source_material
+			)
+		elif atlas_is_ignored is False:
+			raise RuntimeError("atlas is not ignored, but uv0_original is not set!", self.source_object, self.source_material)
+		
+		if uv1_original is not None:
+			copy_uv_layer_exact_name(
+				self.object, uv0_original, KawaMeshCombiner.PROC_TARGET_UV1_NAME,
+				source_object=self.source_object, source_material=self.source_material
+			)
+			copy_uv_layer_exact_name(
+				self.object, uv0_original, KawaMeshCombiner.PROC_ORIGINAL_UV1_NAME,
+				source_object=self.source_object, source_material=self.source_material
+			)
+		
+		def should_remove(name, _):
+			if name == KawaMeshCombiner.PROC_ORIGINAL_UV0_NAME: return False
+			if name == KawaMeshCombiner.PROC_TARGET_UV0_NAME: return False
+			if name == KawaMeshCombiner.PROC_ORIGINAL_UV1_NAME: return False
+			if name == KawaMeshCombiner.PROC_TARGET_UV1_NAME: return False
+			# TODO Keep UVs feature
+			# if name in oobj_setup.keep_uv_layers: return False
+			return True
+		
+		def log_remove(name, _):
+			# log.debug("Removing UV-Layer='%s' from Object='%s' Material='%s'", name, oobj.name, pobj_mat.name)
+			pass
+		
+		remove_uv_layer_by_condition(get_mesh_safe(self.object), should_remove, log_remove)
 
 
 class AttachmentPerObject:
@@ -726,8 +460,8 @@ class UVBoxTransform:
 	def apply(self):
 		counter = 0
 		for ob_name, per_ob in self.attachment.per_ob.items():
-			uv_layer_original = per_ob.mesh.uv_layers[KawaMeshCombiner.PROC_ORIGINAL_ATLAS_UV_NAME]  # type: bpy.types.MeshUVLoopLayer
-			uv_layer_target = per_ob.mesh.uv_layers[KawaMeshCombiner.PROC_TARGET_ATLAS_UV_NAME]  # type: bpy.types.MeshUVLoopLayer
+			uv_layer_original = per_ob.mesh.uv_layers[KawaMeshCombiner.PROC_ORIGINAL_UV0_NAME]  # type: bpy.types.MeshUVLoopLayer
+			uv_layer_target = per_ob.mesh.uv_layers[KawaMeshCombiner.PROC_TARGET_UV0_NAME]  # type: bpy.types.MeshUVLoopLayer
 			uv_data_original = uv_layer_original.data
 			uv_data_target = uv_layer_target.data
 			for poly in per_ob.polys:
@@ -743,6 +477,9 @@ class UVBoxTransform:
 
 
 class KawaMeshCombiner:
+	GLOBAL_KEY = object()
+	GLOBAL_PRIORITY = -1000
+	
 	L_TARGET_OBJECT = 'target_object'
 	L_UV0_ORIGINAL = 'atlas_original_uv'
 	L_UV0_TARGET = 'atlas_target_uv'
@@ -764,10 +501,10 @@ class KawaMeshCombiner:
 	L_ORIGINAL_MATERIALS = 'original_materials'
 	
 	# Имена временных объектов
-	PROC_ORIGINAL_ATLAS_UV_NAME = "__KawaMeshCombiner_UV_Main_Original"
-	PROC_ORIGINAL_LM_UV_NAME = "__KawaMeshCombiner_UV_LightMap_Original"
-	PROC_TARGET_ATLAS_UV_NAME = "__KawaMeshCombiner_UV_Main_Target"
-	PROC_TARGET_LM_UV_NAME = "__KawaMeshCombiner_UV_LightMap_Target"
+	PROC_ORIGINAL_UV0_NAME = "__KawaMeshCombiner_UV_Main_Original"
+	PROC_ORIGINAL_UV1_NAME = "__KawaMeshCombiner_UV_LightMap_Original"
+	PROC_TARGET_UV0_NAME = "__KawaMeshCombiner_UV_Main_Target"
+	PROC_TARGET_UV1_NAME = "__KawaMeshCombiner_UV_LightMap_Target"
 	PROC_OBJECT_NAME = "__KawaMeshCombiner_Processing_Object"
 	PROC_MESH_NAME = "__KawaMeshCombiner_Processing_Mesh"
 	
@@ -832,41 +569,149 @@ class KawaMeshCombiner:
 		else:
 			return iter(())  # empty
 	
-	__slots__ = (
-		'target_object_name', 'atlas_material_name', 'fast_mode',
-		'atlas_ignore', 'uv0_original', 'uv0_target', 'atlas_texture_prefix',
-		'original_size', 'atlas_size', 'atlas_padding', 'atlas_epsilon', 'atlas_single_island', 'atlas_scale_factor_area',
-		'lm_ignore', 'uv1_original', 'uv1_target',
-		'original_objects', 'original_materials', 'atlas_materials', 'atlas_textures',
-		'created_proc_objects'
-	)
+	@classmethod
+	def _default_global_priority(cls):
+		return {cls.GLOBAL_KEY: cls.GLOBAL_PRIORITY}
 	
 	def __init__(self):
-		self.original_objects = dict()  # type: OriginalObjectSetups
-		self.original_materials = dict()  # type: OriginalMaterialSetups
-		self.target_object_name = None  # !
+		#
+		# General config
 		
-		self.uv0_original = 'UVMap'
-		self.uv0_target = 'CombinedAtlas'
-		self.uv1_original = 'UVMap'
-		self.uv1_target = 'CombinedLightmap'
+		self.original_objects = set()  # type: Set[bpy.types.Object]
 		
-		self.original_size = (32, 32)  # type: SizeInt
+		self.target_object = config.ConfigParameter(
+			# Целевой объект (в который будет произведено слияние)
+			# Настройка глобальная, на Объект, на Материал в Объекте
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Object) or config.is_object_material_tuple(k),
+			validator_value=lambda v: isinstance(v, bpy.types.Object),
+			# Нет default
+		)
 		
-		self.atlas_ignore = False
-		self.atlas_material_name = None  # !
-		self.atlas_materials = dict()  # type: AtlasMaterialSetups
-		self.atlas_textures = dict()  # type: AtlasTextureSetups
-		self.atlas_texture_prefix = 'TextureAtlas'
-		self.atlas_size = (2048, 2048)  # type: SizeInt
-		self.atlas_padding = 1.0
-		self.atlas_epsilon = 1.0
-		self.atlas_single_island = False
-		self.atlas_scale_factor_area = True
+		self.uv0_original = config.ConfigParameter(
+			# Какой UV слой брать для текстур материала (атласа). Глобально и на исходный объект.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Object),
+			validator_value=lambda v: is_valid_string(v),
+			default_values={self.GLOBAL_KEY: 'UVMap'},
+			default_priorities=self._default_global_priority(),
+		)
 		
-		self.lm_ignore = True
+		self.uv0_target = config.ConfigParameter(
+			# Как будет называться UV для текстур материала (атласа). Глобально и на целевой объект.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Object),
+			validator_value=lambda v: is_valid_string(v),
+			default_values={self.GLOBAL_KEY: 'CombinedMain'},
+			default_priorities=self._default_global_priority(),
+		)
 		
-		self.fast_mode = False
+		self.uv1_original = config.ConfigParameter(
+			# Какой UV слой брать для Lightmap. Глобально и на исходный объект.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Object),
+			validator_value=lambda v: is_valid_string(v),
+			default_values={self.GLOBAL_KEY: 'UVMap'},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.uv1_target = config.ConfigParameter(
+			# Как будет называться UV для Lightmap. Глобально и на целевой объект.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Object),
+			validator_value=lambda v: is_valid_string(v),
+			default_values={self.GLOBAL_KEY: 'CombinedLightmap'},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		#
+		# Atlas config
+		
+		self.atlas_ignore = config.ConfigParameter(
+			# Игнорировать атлассирование?
+			# Настройка глобальная, на Объект, на Материал
+			# Если атлас не игнорируется на каком-то объекте, то он и не должен игнорироваться на материале!
+			# Если атлас не игнорируется на каком-то объекте или материале, то он и не должен игнорироваться глобально!
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, (bpy.types.Object, bpy.types.Material)),
+			validator_value=lambda v: isinstance(v, bool),
+			default_values={self.GLOBAL_KEY: False},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.atlas_material_size = config.ConfigParameter(
+			# Размеры текстуры: глобально (по-умочанию) и на Материал
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Material),
+			validator_value=lambda v: isinstance(v, tuple) and isinstance(v[0], int) and isinstance(v[1], int),
+			default_values={self.GLOBAL_KEY: False},
+			default_priorities=self._default_global_priority(),
+		)
+		# Кеш авто-определенных размеров материалов
+		self._material_size_detected = dict()  # type: Dict[bpy.types.Material, SizeFloat]
+		
+		self.atlas_material_target = config.ConfigParameter(
+			# Какой материал использовать для атласа?
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Material),
+			validator_value=lambda v: isinstance(v, bpy.types.Material),
+			default_values={self.GLOBAL_KEY: False},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.atlas_material_scale = config.ConfigParameter(
+			# Масштаб материала при атлассировании. На материал.
+			validator_key=lambda k: isinstance(k, bpy.types.Material),
+			validator_value=lambda v: is_positive_float(v),
+		)
+		
+		# Текстуры, на которые рендерится тот или иной тип изображения.
+		self.atlas_textures = dict()  # type: Dict[str, bpy.types.ImageTexture]
+		
+		self.atlas_size = config.ConfigParameter(
+			# Размер атласа. Глабальный и на Текстуру (по её типу или bpy).
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.ImageTexture) or is_valid_string(k),
+			validator_value=lambda v: is_valid_size_int(v),
+			default_values={self.GLOBAL_KEY: (2048, 2048)},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.atlas_padding = config.ConfigParameter(
+			# Размер отступа. Глобальный и на материал.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Material),
+			validator_value=lambda v: is_positive_float(v),
+			default_values={self.GLOBAL_KEY: 2},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.atlas_epsilon = config.ConfigParameter(
+			# Размер слияния боксов. Глобальный и на материал.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Material),
+			validator_value=lambda v: is_positive_or_zero_float(v),
+			default_values={self.GLOBAL_KEY: 2},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.atlas_single_island = config.ConfigParameter(
+			# Быстрый режим одного острова. Глобальный и на материал.
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Material),
+			validator_value=lambda v: isinstance(v, bool),
+			default_values={self.GLOBAL_KEY: False},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		# self.atlas_scale_factor_area = True
+		
+		#
+		# Lightmap config
+		
+		self.lm_ignore = config.ConfigParameter(
+			# Игнорировать Лайтмап?
+			# Настройка глобальная, на Объект
+			# Если Лайтмап не игнорируется на каком-то объекте, то он и не должен игнорироваться глобально!
+			validator_key=lambda k: k is self.GLOBAL_KEY or isinstance(k, bpy.types.Object),
+			validator_value=lambda v: isinstance(v, bool),
+			default_values={self.GLOBAL_KEY: False},
+			default_priorities=self._default_global_priority(),
+		)
+		
+		self.lm_scale = config.ConfigParameter(
+			# Масштаб при лайтмаппинге. На Объект, на Материал, на Материал в Объекте. Умножается.
+			validator_key=lambda k: isinstance(k, (bpy.types.Object, bpy.types.Material)) or config.is_object_material_tuple(k),
+			validator_value=lambda v: is_positive_float(v),
+		)
 	
 	@classmethod
 	def from_raw_config(cls, raw_setup: 'Optional[SetupRaw]'):
@@ -887,8 +732,8 @@ class KawaMeshCombiner:
 		uv1_target = cls.validate_string(raw_setup.get(cls.L_UV1_TARGET), cls.L_UV1_TARGET)
 		general_setup.uv1_target = any_not_none(uv1_target, general_setup.uv1_target)
 		
-		atlas_ignore = cls.validate_bool(raw_setup.get(cls.L_ATLAS_IGNORE), cls.L_ATLAS_IGNORE)
-		general_setup.atlas_ignore = any_not_none(atlas_ignore, general_setup.atlas_ignore)
+		# atlas_ignore = cls.validate_bool(raw_setup.get(cls.L_ATLAS_IGNORE), cls.L_ATLAS_IGNORE)
+		# general_setup.atlas_ignore = any_not_none(atlas_ignore, general_setup.atlas_ignore)
 		
 		atlas_color_size = cls.validate_size_int(raw_setup.get(cls.L_ATLAS_COLOR_SIZE), cls.L_ATLAS_COLOR_SIZE)
 		general_setup.original_size = any_not_none(atlas_color_size, general_setup.original_size)
@@ -1004,48 +849,59 @@ class KawaMeshCombiner:
 			self.atlas_materials[amat_name] = amat_setup
 		return amat_setup
 	
-	def get_all_original_materials(self) -> 'OriginalMaterialSetups':
-		original_materials = dict()
-		for oobj_setup in self.original_objects.values():
-			for slot in oobj_setup.object.material_slots:
+	def get_all_original_materials(self) -> 'Set[bpy.types.Material]':
+		return set(slot.material for oobj in self.original_objects for slot in oobj.material_slots if slot.material is not None)
+	
+	def get_all_atlas_materials(self) -> 'Set[bpy.types.Material]':
+		amats = set()
+		for oobj in self.original_objects:
+			for slot in oobj.material_slots:
+				if slot is None or slot.material is None:
+					# На всех объектах, на всех слотах должен быть материал!
+					raise RuntimeError("Material is not set into slot!", oobj, slot)
 				omat = slot.material
-				if omat is None: continue
-				if omat in original_materials.keys(): continue
-				mat_setup = self.get_original_material_setup(omat)
-				original_materials[omat] = mat_setup
-		return original_materials
+				keys = self.GLOBAL_KEY, oobj, omat, (oobj, omat)
+				if self.atlas_ignore.select_value(*keys) is False:
+					amat = self.atlas_material_target.select_value(*keys)
+					if amat is None:
+						raise RuntimeError("atlas_material_target is not set for Original Material", oobj, omat)
+					amats.add(amat)
+		return amats
 	
-	def prepare_all_atlas_textures(self) -> 'AtlasTextureSetups':
-		# копирует self.target_texture и инициализирует текструры
-		atlas_textures = dict()
-		for atex_setup in self.atlas_textures.values():
-			atex_setup.prepare_texture()
-			atlas_textures[atex_setup.type] = atex_setup
-		return atlas_textures
+	def prepare_all_atlas_textures(self):
+		# Подготавливает текстуры атласа
+		for type, atex in self.atlas_textures.items():
+			aimg = atex.image
+			if aimg is None:
+				raise RuntimeError("Atlas Texture does not have Image!", type, atex)
+			atex.use_alpha = type == 'TEXTURE'
+			atex.use_normal_map = type == 'NORMALS'
+			aimg.colorspace_settings.name = 'sRGB' if type == 'TEXTURE' else 'Non-Color'
+			size = self.atlas_size.select_value(self.GLOBAL_KEY, type, atex)  # type: SizeInt
+			if size is None:
+				raise RuntimeError("atlas_size is not set for atlas texture!", type, atex)
+			if aimg.generated_width != size[0] or aimg.generated_height != size[1]:
+				aimg.generated_width = size[0]
+				aimg.generated_height = size[1]
+				aimg.generated_type = 'COLOR_GRID'
+		return
 	
-	def prepare_all_atlas_materials(self):
-		# Инициализирует self.atlas_materials и AtlasMaterialSetup
-		for omat_setup in self.get_all_original_materials().values():
-			if omat_setup.get_atlas_ignore(): continue
-			amat_name = omat_setup.get_atlas_material_name()
-			try:
-				amat_setup = self.get_atlas_material_setup(amat_name)
-				amat_setup.prepare_material_bpy()
-			except Exception as exc:
-				raise RuntimeError("Error preparing atlas material!", amat_name, omat_setup.material.name) from exc
-		return self.atlas_materials
-	
-	def prepare_target_objects(self):
-		# Создает объекты, в которые скомбинируются результаты
-		target_object_names = set(oobj_setup.get_target_object_name() for oobj_setup in self.original_objects.values())
-		for tobj_name in target_object_names:
-			try:
-				tobj = bpy.context.scene.objects.get(tobj_name)  # type: bpy.types.Object
+	def prepare_target_objects(self) -> 'Set[bpy.types.Object]':
+		# Подготавливает объекты, в которые скомбинируются результаты
+		tobjs = set()
+		for oobj in self.original_objects:
+			for slot in oobj.material_slots:
+				if slot is None or slot.material is None:
+					raise RuntimeError(oobj, slot)
+				omat = slot.material
+				tobj = self.target_object.select_value(self.GLOBAL_KEY, oobj, (oobj, omat))
 				if tobj is None:
-					raise ConfigurationError("Target object does not exist!", tobj_name)
+					raise RuntimeError("target_object is not set!", oobj, omat)
+				tobjs.add(tobj)
+		for tobj in tobjs:
+			try:
 				tobj.hide = False  # Необходимо, т.к. некоторые операторы не работают на скрытых объектах
 				tobj_mesh = get_mesh_safe(tobj)
-				
 				# Очистка
 				remove_all_geometry(tobj)
 				remove_all_shape_keys(tobj)
@@ -1053,104 +909,78 @@ class KawaMeshCombiner:
 				remove_all_vertex_colors(tobj)
 				tobj_mesh.materials.clear(update_data=True)  # Очистка Материалов
 			except Exception as exc:
-				raise RuntimeError("Error preparing target object!", tobj_name) from exc
-	
-	def prepare_proc_object_final(
-			self, pobj: 'bpy.types.Object', oobj_setup: 'OriginalObjectSetup', procs: 'Tuple[List[ProcessingObjectSetup],...]'
-	):
-		pobj_mat = None
-		try:
-			proc_all, proc_main, proc_lightmap, proc_none = procs
-			global_do_atlas = self.atlas_ignore is not True
-			global_do_lm = self.lm_ignore is not True
-			
-			bpy.context.scene.objects.active = pobj
-			pobj_setup = ProcessingObjectSetup(self, pobj, oobj_setup)
-			proc_all.append(pobj_setup)
-			pobj_mat = pobj_setup.get_material_bpy()  # test for Exception as well
-			# log.info("Preparing Object='%s' Material='%s'...", oobj.name, pobj_mat.name)
-			pobj_mat_setup = self.get_original_material_setup(pobj_mat)
-			
-			mesh = get_mesh_safe(pobj)
-			
-			mesh.name = KawaMeshCombiner.PROC_MESH_NAME + pobj.name
-			pobj.name = KawaMeshCombiner.PROC_OBJECT_NAME + pobj.name
-			
-			do_atlas = global_do_atlas and pobj_mat_setup.get_atlas_ignore() is not True
-			do_lm = global_do_lm and pobj_mat_setup.get_lm_ignore() is not True
-			
-			# log.debug("Object='%s' Material='%s' do_atlas='%s' do_lm='%s'", oobj.name, pobj_mat.name, do_atlas, do_lm)
-			
-			# Подготовка UV и всё такое
-			
-			if global_do_atlas:
-				uv0_original_name = oobj_setup.get_uv0_original()
-				if is_valid_string(uv0_original_name) and uv0_original_name in mesh.uv_textures.keys():
-					# log.debug(
-					# 	"Using UV-Layer='%s' as Main (UV0) layer for Object='%s' Material='%s'",
-					# 	mesh.uv_textures[uv0_original_name].name, oobj.name, pobj_mat.name
-					# )
-					# Копия для цели
-					bpy.context.scene.objects.active = pobj
-					mesh.uv_textures[uv0_original_name].active = True
-					ensure_op_finished(bpy.ops.mesh.uv_texture_add(), name='bpy.ops.mesh.uv_texture_add')
-					mesh.uv_textures.active.name = KawaMeshCombiner.PROC_TARGET_ATLAS_UV_NAME
-					# Копия для исходника
-					bpy.context.scene.objects.active = pobj
-					mesh.uv_textures[uv0_original_name].active = True
-					ensure_op_finished(bpy.ops.mesh.uv_texture_add(), name='bpy.ops.mesh.uv_texture_add')
-					mesh.uv_textures.active.name = KawaMeshCombiner.PROC_ORIGINAL_ATLAS_UV_NAME
-			
-			if global_do_lm:
-				uv1_original_name = oobj_setup.get_uv1_original()
-				if is_valid_string(uv1_original_name) and uv1_original_name in mesh.uv_textures.keys():
-					# log.debug(
-					# 	"Using UV-Layer='%s' as Lightmap (UV1) layer for Object='%s' Material='%s'",
-					# 	mesh.uv_textures[uv1_original_name].name, oobj.name, pobj_mat.name
-					# )
-					# Копия для цели
-					bpy.context.scene.objects.active = pobj
-					mesh.uv_textures[uv1_original_name].active = True
-					ensure_op_finished(bpy.ops.mesh.uv_texture_add(), name='bpy.ops.mesh.uv_texture_add')
-					mesh.uv_textures.active.name = KawaMeshCombiner.PROC_TARGET_LM_UV_NAME
-					# Копия для исходника
-					bpy.context.scene.objects.active = pobj
-					mesh.uv_textures[uv1_original_name].active = True
-					ensure_op_finished(bpy.ops.mesh.uv_texture_add(), name='bpy.ops.mesh.uv_texture_add')
-					mesh.uv_textures.active.name = KawaMeshCombiner.PROC_ORIGINAL_LM_UV_NAME
-			
-			if do_atlas:
-				proc_main.append(pobj_setup)
-			if do_lm:
-				proc_lightmap.append(pobj_setup)
-			if not do_atlas and not do_lm:
-				proc_none.append(pobj_setup)
-			
-			def should_remove(name, _):
-				if name == KawaMeshCombiner.PROC_ORIGINAL_ATLAS_UV_NAME: return False
-				if name == KawaMeshCombiner.PROC_TARGET_ATLAS_UV_NAME: return False
-				if name == KawaMeshCombiner.PROC_ORIGINAL_LM_UV_NAME: return False
-				if name == KawaMeshCombiner.PROC_TARGET_LM_UV_NAME: return False
-				if name in oobj_setup.keep_uv_layers: return False
-				return True
-			
-			def log_remove(name, _):
-				# nonlocal counter_uv_rm
-				# log.debug("Removing UV-Layer='%s' from Object='%s' Material='%s'", name, oobj.name, pobj_mat.name)
-				# counter_uv_rm += 1
-				pass
-			
-			remove_uv_layer_by_condition(mesh, should_remove, log_remove)
-		
-		except Exception as exc:
-			raise RuntimeError("Error preparing processing object!", pobj, oobj_setup.object, pobj_mat) from exc
+				raise RuntimeError("Error preparing target object!", tobj) from exc
+		return tobjs
 	
 	def prepare_proc_object(
-			self, oobj_setup: 'OriginalObjectSetup', procs: 'Tuple[List[ProcessingObjectSetup],...]'
+			self, oobj: 'bpy.types.Object', proc_objs: 'List[ProcessingObjectSetup]', new_objs: 'Set[bpy.types.Object]'
 	):
-		new_objs = set()  # созданные, не оригинальные объекты
+		# Создает рабочие копии из оригинальных объектов
 		deque = collections.deque()
-		oobj = oobj_setup.object
+		
+		def create_proc_object_setup(pobj: 'bpy.types.Object') -> 'ProcessingObjectSetup':
+			# Создает ProcessingObjectSetup из уже подготовленного pre-processing-объекта.
+			omat = None
+			try:
+				# Активный, что бы видеть где креш.
+				bpy.context.scene.objects.active = pobj
+				
+				mesh = get_mesh_safe(pobj)
+				# Первым делом, переименование, что бы после возможного креша было видно левые объекты
+				mesh.name = KawaMeshCombiner.PROC_MESH_NAME + pobj.name
+				pobj.name = KawaMeshCombiner.PROC_OBJECT_NAME + pobj.name
+				
+				omat = ensure_single_material_slot(pobj)
+				pobj_setup = ProcessingObjectSetup(self, pobj, oobj, omat)
+				proc_objs.append(pobj_setup)
+			except Exception as exc:
+				raise RuntimeError("Error creating processing object!", pobj, oobj, omat) from exc
+		
+		# Выносить preprocess в отдельные функи не обязательно, но мне так удобней
+		
+		def preprocess_dupli_group(tobj: 'bpy.types.Object'):
+			# Обробатываемый объект - дупль-объект: преобразуем его в реальный и одно-пользовательский
+			ensure_deselect_all_objects()
+			tobj.select = True
+			bpy.context.scene.objects.active = tobj
+			ensure_op_finished(bpy.ops.object.duplicates_make_real(
+				use_base_parent=True, use_hierarchy=True
+			), name='bpy.ops.object.duplicates_make_real', tobj=tobj.name)
+			tobj.select = False
+			ensure_op_finished(bpy.ops.object.make_single_user(
+				type='SELECTED_OBJECTS', object=True, obdata=True, material=False, texture=False, animation=False
+			), name='bpy.ops.object.make_single_user', tobj=tobj.name)
+			for sobj in bpy.context.selected_objects:
+				# Все созданные объекты сразу запоминаем
+				new_objs.add(sobj)
+			for sobj in bpy.context.selected_objects:
+				sobj.hide = False  # Необходимо
+				deque.append(sobj)  # Все новые объекты идут на новый цикл обработки.
+				sobj.select = False
+				sobj[self.PROC_OBJECT_TAG] = True
+		
+		def preprocess_mesh_object(tobj: 'bpy.types.Object'):
+			# Ничего страшного, т.к. data - тоже рабочия копия.
+			switch_material_slots_from_object_to_data(tobj)
+			# Применение модиферов, прежде, чем резать
+			apply_all_modifiers(tobj)
+			
+			if len(tobj.material_slots) > 1:
+				# у меши более одного слота материала - нужно её порезать
+				sobjs = separate_object_by_materials(tobj)
+				new_objs.update(sobjs)  # Все созданные объекты регистрируем
+				for sobj in sobjs:
+					sobj.hide = False  # Необходимо
+					deque.append(sobj)  # Все новые объекты идут на новый цикл обработки.
+					sobj.select = False
+					sobj[self.PROC_OBJECT_TAG] = True
+			else:
+				# у меши однин слот материала - можно использовать как processing-объект
+				create_proc_object_setup(tobj)
+				new_objs.discard(tobj)
+		
+		# Здесь создается копия оригинального объекта и начинает "парситься"
+		
 		try:
 			# Мы никогда не трогаем оригиналы, так что создаем рабочую копиию
 			oobj.hide = False  # Необходимо, т.к. некоторые операторы не работают на скрытых объектах
@@ -1160,103 +990,40 @@ class KawaMeshCombiner:
 			bpy.ops.object.duplicate(linked=False)
 			base_pobj = bpy.context.scene.objects.active
 			ensure_selected_single(base_pobj, dict(original=oobj))
-			deque.append(base_pobj)
-			new_objs.add(base_pobj)
+			new_objs.add(base_pobj)  # Свеже-дублированный объект сразу запоминаем!
+			deque.append(base_pobj)  # и клаём в очередь для последующего анализа.
 			ensure_deselect_all_objects()
+			# На данный момент мы имеем временный объект, но их может стать несколько.
 			
 			while len(deque) > 0:
 				tobj = deque.popleft()  # type: bpy.types.Object
 				try:
 					if tobj.dupli_type == 'GROUP' and tobj.dupli_group is not None:
-						# Обробатываемый объект - дупль-объект: преобразуем его в реальный и одно-пользовательский
-						ensure_deselect_all_objects()
-						tobj.select = True
-						bpy.context.scene.objects.active = tobj
-						ensure_op_finished(bpy.ops.object.duplicates_make_real(
-							use_base_parent=True, use_hierarchy=True
-						), name='bpy.ops.object.duplicates_make_real', tobj=tobj.name)
-						tobj.select = False
-						ensure_op_finished(bpy.ops.object.make_single_user(
-							type='SELECTED_OBJECTS', object=True, obdata=True, material=False, texture=False, animation=False
-						), name='bpy.ops.object.make_single_user', tobj=tobj.name)
-						for sobj in bpy.context.selected_objects:
-							# Все созданные объекты регистрируем
-							sobj.hide = False  # Необходимо
-							deque.append(sobj)
-							new_objs.add(sobj)
-							sobj.select = False
-							sobj[self.PROC_OBJECT_TAG] = True
-					elif isinstance(tobj.data, bpy.types.Mesh):
-						# Обрабатываемый объект - меш
-						for slot in tobj.material_slots:
-							if slot.material is None:
-								raise RuntimeError("Material is not set!", tobj, slot)
-							if slot.link == 'OBJECT':
-								objec_mat = slot.material
-								log.info("Object='%s': Switching Material='%s' from OBJECT to DATA...", oobj.name, objec_mat.name)
-								slot.link = 'DATA'
-								slot.material = objec_mat
-						
-						# Применение модиферов, прежде, чем резать
-						apply_all_modifiers(tobj)
-						
-						if len(tobj.material_slots) > 1:
-							# у меши более одного слота материала - нужно её порезать
-							ensure_deselect_all_objects()
-							tobj.select = True
-							bpy.context.scene.objects.active = tobj
-							ensure_op_result(
-								bpy.ops.mesh.separate(type='MATERIAL'), ('FINISHED', 'CANCELLED'), name="bpy.ops.mesh.separate",
-							)
-							for sobj in bpy.context.selected_objects:
-								# Все созданные объекты регистрируем
-								sobj.hide = False  # Необходимо
-								deque.append(sobj)
-								new_objs.add(sobj)
-								sobj.select = False
-								sobj[self.PROC_OBJECT_TAG] = True
-						else:
-							# у меши однин слот материала - можно использовать
-							self.prepare_proc_object_final(tobj, oobj_setup, procs)
-							new_objs.discard(tobj)
+						preprocess_dupli_group(tobj)
+					elif isinstance(tobj.data, bpy.types.Mesh):  # Обрабатываемый объект - меш
+						preprocess_mesh_object(tobj)
 				except Exception as exc:
-					raise RuntimeError("Error preparing processing object: (tobj)", tobj) from exc
+					raise RuntimeError("Error pre-processing temp object!", tobj, oobj) from exc
 		except Exception as exc:
-			raise RuntimeError("Error preparing processing object: (oobj, new_objs, deque)", oobj, new_objs, deque) from exc
+			raise RuntimeError("Error preparing processing object!", oobj, new_objs, deque) from exc
 		return new_objs
 	
 	def prepare_proc_objects(self):
-		# Создает рабочую копию оригинального объекта, разбивает её на части, выбирает нужные UV
+		# Создает рабочие копии оригинальных объектов.
+		
 		log.info("Preparing objects for processing...")
-		proc_all = list()  # type: List[ProcessingObjectSetup]
-		proc_main = list()  # type: List[ProcessingObjectSetup]
-		proc_lightmap = list()  # type: List[ProcessingObjectSetup]
-		proc_none = list()  # type: List[ProcessingObjectSetup]
+		proc_objs = list()  # type: List[ProcessingObjectSetup]
 		new_objs = set()  # type: Set[bpy.types.Object]
 		
-		global_do_atlas = self.atlas_ignore is not True
-		global_do_lm = self.lm_ignore is not True
-		
-		if global_do_atlas:
-			log.info("Global atlas_ignore=False: Going to USE Main (UV0) Layers...")
-		else:
-			log.info("Global atlas_ignore=True: Going to IGNORE Main (UV0) Layers...")
-		if global_do_lm:
-			log.info("Global lightmap_ignore=False: Going to USE Lightmap (UV1) Layers...")
-		else:
-			log.info("Global lightmap_ignore=True: Going to IGNORE Lightmap (UV1) Layers...")
-		
-		counter_oobj, counter_uv_rm = 0, 0
-		for oobj_setup in self.original_objects.values():
-			oobj_new_objs = self.prepare_proc_object(oobj_setup, (proc_all, proc_main, proc_lightmap, proc_none))
-			new_objs.update(oobj_new_objs)
+		for oobj in self.original_objects:
+			self.prepare_proc_object(oobj, proc_objs, new_objs)
 		
 		ensure_deselect_all_objects()
 		log.info(
-			"Prepared %d objects for processing: atlas=%d, lightmap=%d, ignoring=%d, (total=%d); Removed UV layers: %d",
-			counter_oobj, len(proc_main), len(proc_lightmap), len(proc_none), len(proc_all), counter_uv_rm
+			"From %d original objects prepared: for processing: %d, total new objects: %d",
+			len(self.original_objects), len(proc_objs), len(new_objs),
 		)
-		return proc_all, proc_main, proc_lightmap, proc_none, new_objs
+		return proc_objs, new_objs
 	
 	def atlas_find_islands(self, proc_objects: 'Iterable[ProcessingObjectSetup]') -> 'IslandsBuilders':
 		# Выполняет поиск островов на заданных объектах и материалах
@@ -1290,7 +1057,7 @@ class KawaMeshCombiner:
 			if builder is None:
 				builder = IslandsBuilder()
 				builders[mat] = builder
-			uv_data = mesh.uv_layers.get(self.PROC_ORIGINAL_ATLAS_UV_NAME).data  # type: List[bpy.types.MeshUVLoop]
+			uv_data = mesh.uv_layers.get(self.PROC_ORIGINAL_UV0_NAME).data  # type: List[bpy.types.MeshUVLoop]
 			epsilon = mat_setup.get_atlas_epsilon()
 			mat_size_x, mat_size_y = mat_setup.get_original_size()
 			polygons = list(mesh.polygons)
@@ -1524,7 +1291,7 @@ class KawaMeshCombiner:
 				log.info("Saved Texture='%s' type='%s' as '%s'...", atex_image.name, atex_setup.type, save_path)
 			except Exception as exc:
 				raise RuntimeError("Error bake!", atex_image.name, atex_setup.type, atex_image, bpy.context.scene.objects.active) from exc
-
+		
 		if bpy.context.scene.objects.active is not None:
 			bpy.context.blend_data.meshes.remove(get_mesh_safe(bpy.context.scene.objects.active), do_unlink=True)
 		if bpy.context.scene.objects.active is not None:
@@ -1544,8 +1311,8 @@ class KawaMeshCombiner:
 				pobj_setup.object.hide_render = False
 				# bpy.context.scene.objects.active = pobj_setup.object
 				for layer in get_mesh_safe(pobj_setup.object).uv_textures:  # type: bpy.types.MeshTexturePolyLayer
-					layer.active = layer.name == self.PROC_TARGET_ATLAS_UV_NAME
-					layer.active_render = layer.name == self.PROC_ORIGINAL_ATLAS_UV_NAME
+					layer.active = layer.name == self.PROC_TARGET_UV0_NAME
+					layer.active_render = layer.name == self.PROC_ORIGINAL_UV0_NAME
 					layer.active_clone = False
 					if layer.active:
 						for data in layer.data:  # type: bpy.types.MeshTexturePoly
@@ -1623,8 +1390,8 @@ class KawaMeshCombiner:
 				tmesh = get_mesh_safe(tobj)
 				
 				def should_remove(name, _):
-					if name == self.PROC_ORIGINAL_ATLAS_UV_NAME: return True
-					if name == self.PROC_ORIGINAL_LM_UV_NAME: return True
+					if name == self.PROC_ORIGINAL_UV0_NAME: return True
+					if name == self.PROC_ORIGINAL_UV1_NAME: return True
 					return False
 				
 				def do_remove(name, _):
@@ -1634,11 +1401,11 @@ class KawaMeshCombiner:
 				
 				remove_uv_layer_by_condition(tmesh, should_remove, do_remove)
 				
-				uv_atlas_target = tmesh.uv_textures.get(self.PROC_TARGET_ATLAS_UV_NAME)
+				uv_atlas_target = tmesh.uv_textures.get(self.PROC_TARGET_UV0_NAME)
 				if uv_atlas_target is not None:
 					uv_atlas_target.name = self.get_atlas_target_uv()
 					counter_rn += 1
-				uv_lm_target = tmesh.uv_textures.get(self.PROC_TARGET_LM_UV_NAME)
+				uv_lm_target = tmesh.uv_textures.get(self.PROC_TARGET_UV1_NAME)
 				if uv_lm_target is not None:
 					uv_lm_target.name = self.get_lm_target_uv()
 					counter_rn += 1
@@ -1647,32 +1414,38 @@ class KawaMeshCombiner:
 				raise RuntimeError("Error renaming UV!", tobj, tmesh, uv_atlas_original, uv_atlas_target, uv_lm_original, uv_lm_target) from exc
 		log.info("Removed=%d, Renamed=%d UVs on target objects!", counter_rm, counter_rn)
 	
+	def atlas_is_ignored(self, source_object, source_material):
+		value = self.atlas_ignore.select_value(self.GLOBAL_KEY, source_object, source_material)
+		if value is None:
+			raise RuntimeError('atlas_ignore is not set!', source_object, source_material)
+		return value
+	
 	def run(self):
 		print()
 		log.info('Preparing...')
 		
-		log.info('Using original objects: %s', tuple(x.name for x in self.original_objects.keys()))
-		
-		log.info('Preparing original materials...')
+		log.info('Using original objects: %s', tuple(sorted(x.name for x in self.original_objects)))
 		original_materials = self.get_all_original_materials()
-		log.info('Using original materials: %s', tuple(x.name for x in original_materials.keys()))
+		log.info('Using original materials: %s', tuple(sorted(x.name for x in original_materials)))
 		
-		log.info('Preparing target textures...')
-		target_textures = self.prepare_all_atlas_textures()
-		log.info('Using target textures: %s', tuple(x.prepare_texture().name for x in target_textures.values()))
-		
-		log.info('Preparing target materials...')
-		target_materials = self.prepare_all_atlas_materials()
-		log.info('Using target materials: %s', list(target_materials.keys()))
+		used_atlas_materials = self.get_all_atlas_materials()
+		log.info('Using atlas materials: %s', tuple(sorted(x.name for x in used_atlas_materials)))
+		self.prepare_all_atlas_textures()
+		log.info('Using atlas textures: %s', list(self.atlas_textures.items()))
 		
 		log.info('Preparing target objects...')
-		self.prepare_target_objects()
+		used_target_objects = self.prepare_target_objects()
+		log.info('Prepared target objects: %s', tuple(sorted(x.name for x in used_target_objects)))
 		
-		log.info('Making copies for processing on...')
-		proc_objects, proc_main, proc_lightmap, proc_none, new_objs = self.prepare_proc_objects()
+		log.info('Making working copies of objects...')
+		proc_objects, new_objs = self.prepare_proc_objects()
+		
+		log.info('Preparing UVs...')
+		for pobj_setup in proc_objects:
+			pobj_setup.uvs_from_original_to_processing()
 		
 		for pobj_setup in proc_none:  # type: ProcessingObjectSetup
-			log.info("Ignoring Object='%s' Material='%s'...", pobj_setup.original.object.name, pobj_setup.get_material_bpy().name)
+			log.info("Ignoring Object='%s' Material='%s'...", pobj_setup.source_object.object.name, pobj_setup.get_material_bpy().name)
 		
 		if len(proc_main) > 0:
 			log.info('Looking for UV-Main islands...')
@@ -1728,11 +1501,11 @@ class KawaMeshCombiner:
 		for tobj in target_objects:
 			log.info("Updating UV1 in Target Object='%s'...", tobj.name)
 			tobj_mesh = get_mesh_safe(tobj)
-			uv1_target = tobj_mesh.uv_textures.get(self.PROC_TARGET_LM_UV_NAME)  # type: bpy.types.MeshTexturePolyLayer
+			uv1_target = tobj_mesh.uv_textures.get(self.PROC_TARGET_UV1_NAME)  # type: bpy.types.MeshTexturePolyLayer
 			if uv1_target is None:
 				log.info("Target Object='%s' does not have target uv1 (%s)", tobj.name, tobj_mesh.uv_textures.keys())
 				continue
-			repack_lightmap_uv(tobj, self.PROC_TARGET_LM_UV_NAME, rotate=True, margin=0.003)
+			repack_lightmap_uv(tobj, self.PROC_TARGET_UV1_NAME, rotate=True, margin=0.003)
 		
 		self.rename_proc_uvs(target_objects)
 		
